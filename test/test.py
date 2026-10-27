@@ -147,6 +147,15 @@ def write_png(path, pixels):
         f.write(chunk(b"IEND", b""))
 
 
+def skip_long_at_gate_level(dut):
+    """Gate level under Icarus runs about 160 s a frame, so only the short
+    tests (sync, attract, round: about 70 min) run there."""
+    if os.environ.get("GATES") == "yes":
+        dut._log.info("skipped at gate level: too long, see skip_long_at_gate_level")
+        return True
+    return False
+
+
 def cell(pixels, x, y):
     """Colour at the middle of grid cell (x, y)."""
     return pixels[y * CELL + CELL // 2][x * CELL + CELL // 2]
@@ -239,6 +248,8 @@ async def test_match_end(dut):
     """Player 2 starts on 11 wins and takes the scripted round of test_round
     (without the turn). The 12th win flashes every pip for about 2 s, then
     all the scores go back to 0."""
+    if skip_long_at_gate_level(dut):
+        return
     pads = Gamepads(dut, present=(True, True))
     await setup(dut, speed=3, pads=pads)
     await next_vblank(dut)
@@ -401,6 +412,8 @@ class Model:
 async def test_random_vs_model(dut):
     """Random turns for all four players over many rounds, checked against
     the model every few frames. Covers wrapping and ring overflow."""
+    if skip_long_at_gate_level(dut):
+        return
     import random
     if cocotb.SIM_NAME.lower().startswith("icarus") and "MODEL_FRAMES" not in os.environ:
         dut._log.info("skipped under Icarus (about 40 s a frame); use SIM=verilator")
@@ -480,6 +493,8 @@ async def test_random_vs_model(dut):
 async def test_bots(dut):
     """With no controllers, bots start a round by themselves after about a
     second, steer around trails, and turn now and then."""
+    if skip_long_at_gate_level(dut):
+        return
     await setup(dut, speed=3, pads=Gamepads(dut, present=(False, False)))
     for _ in range(64 + 2 + 30):  # waiting, then 30 moves
         await next_vblank(dut)
@@ -498,6 +513,8 @@ async def test_attract_exit(dut):
     """Controllers plugged in but nobody has joined: attract mode starts by
     itself and its rounds may never end, so Start must end it. The lobby
     then waits for players to join and press Start."""
+    if skip_long_at_gate_level(dut):
+        return
     pads = Gamepads(dut, present=(True, True))
     await setup(dut, speed=3, pads=pads)
     for _ in range(64 + 2 + 10):  # attract round under way
