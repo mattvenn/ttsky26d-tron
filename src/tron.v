@@ -124,8 +124,9 @@ module tron (
   reg  [6:0] match_end;
 
   reg  [1:0] round;
-  reg  [1:0] winner;
-  reg        has_winner;
+  // Before the last move. If it leaves nobody alive the round is a draw:
+  // those who died in it come back, so their trails stay on screen.
+  reg  [3:0] alive_was;
   reg  [3:0] frame_cnt;
 
   // Memory: one 32 word x 32 bit register file (Sylvain Munaut's rf_top
@@ -538,8 +539,6 @@ module tron (
       start_pending <= 1'b0;
       alive         <= 4'b0;
       kill          <= 4'b0;
-      has_winner    <= 1'b0;
-      winner        <= 2'd0;
       frame_cnt     <= 4'd0;
       match_end     <= 7'd0;
       tdiv          <= 3'd0;
@@ -655,7 +654,6 @@ module tron (
             gstate     <= G_IDLE;
             round      <= init_round;
             need_init  <= 1'b0;
-            has_winner <= 1'b0;
             tdiv       <= tick_period - 3'd1;
           end
           kill <= 4'b0;
@@ -759,6 +757,7 @@ module tron (
               hx[i2] <= tx[i2];
               hy[i2] <= ty[i2];
             end
+          alive_was <= alive;
           alive  <= alive & ~kill;
           kill   <= 4'b0;  // ready for the next move
           gstate <= G_SCORE;
@@ -777,8 +776,7 @@ module tron (
         end else begin
           if (n_alive <= 3'd1) begin
             round      <= R_OVER;
-            has_winner <= (n_alive == 3'd1);
-            winner     <= alive_idx;
+            if (n_alive == 3'd0) alive <= alive_was;  // a draw
             if (n_alive == 3'd1 && score[alive_idx] != 4'd12)
               score[alive_idx] <= score[alive_idx] + 4'd1;
             if (n_alive == 3'd1 && score[alive_idx] == 4'd11)
@@ -982,7 +980,9 @@ module tron (
                              !px_mark ? BLACK :
                              input_mode[0] ? WHITE : input_mode[1] ? 6'b00_01_11 : BLACK;
     else if (px_head) rgb = (round == R_READY && !px_joined && frame_cnt[3]) ? pcol(px_cell[1:0]) : WHITE;
-    else if (px_cell[2]) rgb = (round == R_OVER && has_winner && px_cell[1:0] == winner && frame_cnt[3])
+    // Once a round is over only the winner's trail is left, or in a draw
+    // the trails of those who crashed last: they flash.
+    else if (px_cell[2]) rgb = (round == R_OVER && frame_cnt[3])
                                ? WHITE : pcol(px_cell[1:0]);
     else if (px_grid) rgb = GRID;
     else rgb = BLACK;

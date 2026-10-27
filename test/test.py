@@ -238,6 +238,46 @@ async def test_round(dut):
     assert px[595][8] == BLACK and px[595][200 + 8] == BLACK and px[595][600 + 8] == BLACK
 
 
+@cocotb.test()
+async def test_draw(dut):
+    """Player 0 turns up on the fourth move. Players 1 and 3 crash on move
+    18; player 0, wrapping off the top, meets player 2 head on at (15, 27)
+    on move 22. A draw: both of their trails stay and flash, and nobody
+    scores."""
+    if skip_long_at_gate_level(dut):
+        return
+    pads = Gamepads(dut, present=(True, True))
+    await setup(dut, speed=3, pads=pads)
+    await next_vblank(dut)
+    await pads.press_many([(0, "left"), (0, "y"), (1, "left"), (1, "y")])
+    await pads.press(1, "start")
+    await next_vblank(dut)          # playing
+    for _ in range(3):
+        await next_vblank(dut)
+    await pads.press(0, "left")     # player 0: right to up, on move 4
+    for _ in range(20):
+        await next_vblank(dut)
+
+    # Two frames 8 apart, so one of each flash phase.
+    frames = [await capture_frame(dut, "frame_draw")]
+    for _ in range(7):
+        await next_vblank(dut)
+    frames.append(await capture_frame(dut, "frame_draw"))
+    trail0 = [(15, y) for y in list(range(0, 9)) + list(range(28, 37))]
+    trail2 = [(x, 27) for x in range(16, 38)]
+    for px in frames:
+        assert cell(px, 15, 27) == WHITE, "heads"
+        for c in trail0:
+            assert cell(px, *c) in (COLOURS[0], WHITE), f"player 0 at {c}"
+        for c in trail2:
+            assert cell(px, *c) in (COLOURS[2], WHITE), f"player 2 at {c}"
+        for c in [(37, 20), (12, 20)]:
+            assert cell(px, *c) == BLACK, f"dead trail left at {c}"
+        assert not any(sum(pips(px), [])), "a draw scores nothing"
+    assert {cell(px, 15, 4) for px in frames} == {COLOURS[0], WHITE}, "player 0 did not flash"
+    assert {cell(px, 30, 27) for px in frames} == {COLOURS[2], WHITE}, "player 2 did not flash"
+
+
 def pips(px):
     """Which of each player's 12 pips are lit, as four lists of booleans."""
     return [[px[595][200 * p + 16 * k + 8] == COLOURS[p] for k in range(12)] for p in range(4)]
@@ -341,6 +381,7 @@ class Model:
         return grid
 
     def tick(self):
+        alive_was = list(self.alive)
         for p in range(4):
             if self.queue[p]:
                 turn = self.queue[p].pop(0)
@@ -360,19 +401,24 @@ class Model:
                 if not (0 <= nx < GW and 0 <= ny < GH):
                     self.wraps += 1
                 targets[p] = (nx % GW, ny % GH)
-        dead = {p for p, t in targets.items() if t in grid}
-        dead |= {p for p, t in targets.items() if list(targets.values()).count(t) > 1}
-        for p, t in targets.items():
-            if p in dead:
+        # Into a trail: dies where it is. Heads that meet move into the
+        # cell they share, then die.
+        moved = {p: t for p, t in targets.items() if t not in grid}
+        for p in targets:
+            if p not in moved:
                 self.alive[p] = False
-            else:
-                self.heads[p] = list(t)
+        for p, t in moved.items():
+            self.heads[p] = list(t)
+            if list(moved.values()).count(t) > 1:
+                self.alive[p] = False
         left = [p for p in range(4) if self.alive[p]]
         if len(left) <= 1:
             self.round = OVER
             if left:
                 self.winner = left[0]
                 self.score[self.winner] = min(12, self.score[self.winner] + 1)
+            else:
+                self.alive = alive_was  # a draw: the last to crash stay on screen
 
     def vblank(self):
         """What the RTL's G_IDLE does on ev_tick, at speed 3 (a move a frame)."""
@@ -401,7 +447,7 @@ class Model:
                     exp[(x, y)] = {BLACK}
                 elif [x, y] == self.heads[p]:
                     exp[(x, y)] = {WHITE, COLOURS[p]} if self.round == READY else {WHITE}
-                elif self.round == OVER and p == self.winner:
+                elif self.round == OVER:  # the winner, or the draw
                     exp[(x, y)] = {WHITE, COLOURS[p]}
                 else:
                     exp[(x, y)] = {COLOURS[p]}
