@@ -37,6 +37,11 @@ VERILOG_SOURCES += $(SRC_DIR)/rf_top.v
 
 endif
 
+# tb.v has delays
+ifeq ($(SIM),verilator)
+EXTRA_ARGS      += --timing
+endif
+
 # Allow sharing configuration between design and testbench via `include`:
 COMPILE_ARGS 		+= -I$(SRC_DIR)
 

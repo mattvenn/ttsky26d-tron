@@ -9,9 +9,12 @@ jobs:
         with:
           submodules: recursive
 
-      - name: Install iverilog
-        shell: bash
-        run: sudo apt-get update && sudo apt-get install -y iverilog
+      # Verilator rather than Icarus: the long tests take hours under Icarus.
+      # Ubuntu's Verilator is too old for cocotb 2.1.
+      - name: Install Verilator
+        uses: YosysHQ/setup-oss-cad-suite@v4
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
 
       # Set Python up and install cocotb
       - name: Setup python
@@ -27,7 +30,7 @@ jobs:
         run: |
           cd test
           make clean
-          make
+          make SIM=verilator
           # make will return success even if the tests fail, so check results.xml for failed tests
           python -m cocotb_tools.check_results results.xml
 
