@@ -2,7 +2,7 @@
 
 ![The four players' trails spelling TRON](social_preview.png)
 
-Four player light cycles on an 800x600 VGA screen. Each player leaves a trail, and running into any trail, or into another player head on, is fatal. The last player alive wins the round and gets a pip in the score strip along the bottom of the screen, up to 12 each. The edges wrap: leave the left side and you come back on the right, and the same for top and bottom.
+Four player light cycles on an 800x600 VGA screen. Each player leaves a trail, and running into any trail, or into another player head on, is fatal. The last player alive wins the round and gets a pip in the score strip along the bottom of the screen. The first to 12 wins the match. The edges wrap: leave the left side and you come back on the right, and the same for top and bottom.
 
 The playfield is a 50x37 grid of 16 pixel cells. There is no framebuffer. Each trail is stored as a list of corners in one shared ring of 66, three to a word in a 32 x 32 bit register file (Sylvain Munaut's rf_top macro, set up as in Uri Shaked's SIC-1). A corner is 9 bits: the owner, which way the trail left, and just the coordinate that changed, since consecutive corners share the other. Each trail's first point is kept in a register. Wraps need no corners, because a straight segment can't go all the way round without hitting its own start. When the ring is full the newest corner overwrites the oldest, so the oldest trail loses its first segment rather than the game running out of memory.
 
@@ -55,7 +55,7 @@ Any player nobody is controlling is played by a bot: it drives straight on, turn
 
 After 30 seconds with no button pressed between rounds, everyone becomes a bot again and rounds start by themselves: an attract mode, which also starts about a second after reset. Start or any turn button ends it and goes back to the start positions, where players' heads blink until they join and show solid white once they have. Then press Start.
 
-When a round ends the winner's trail flashes and they get a pip in the score strip.
+When a round ends the winner's trail flashes and they get a pip in the score strip. When someone reaches 12, every pip flashes for about 2 seconds, then all the scores go back to 0 and the next round can start.
 
 ## External hardware
 

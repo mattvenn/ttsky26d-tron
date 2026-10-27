@@ -247,6 +247,10 @@ module tron (
   reg  [1:0] s3_o;
   reg  [6:0] s3_um, s3_wm;
 
+  // Set by the game tick (G_TURN2): point the idle engine's read port at
+  // word n_w.
+  reg        rmw_req;
+
   always @(posedge clk) begin
     e_done <= 1'b0;
     if (!rst_n) begin
@@ -361,7 +365,6 @@ module tron (
   reg  [3:0] gstate;
   reg  [3:0] gret;        // where G_RMW2 goes once the corner is written
   reg  [8:0] t_ent;       // the corner G_RMW1/2 adds to the ring
-  reg        rmw_req;     // point the idle engine's read port at word n_w
   reg        rmw_ph;
   // Adding a corner reads its word (G_RMW1), puts it in its lane and writes
   // the word back (G_RMW2). When the ring is full that lane held the oldest
