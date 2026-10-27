@@ -229,6 +229,45 @@ async def test_round(dut):
     assert px[595][8] == BLACK and px[595][200 + 8] == BLACK and px[595][600 + 8] == BLACK
 
 
+def pips(px):
+    """Which of each player's 12 pips are lit, as four lists of booleans."""
+    return [[px[595][200 * p + 16 * k + 8] == COLOURS[p] for k in range(12)] for p in range(4)]
+
+
+@cocotb.test()
+async def test_match_end(dut):
+    """Player 2 starts on 11 wins and takes the scripted round of test_round
+    (without the turn). The 12th win flashes every pip for about 2 s, then
+    all the scores go back to 0."""
+    pads = Gamepads(dut, present=(True, True))
+    await setup(dut, speed=3, pads=pads)
+    await next_vblank(dut)
+    for p, n in enumerate((3, 5, 11, 0)):
+        dut.user_project.core.score[p].value = n
+    await pads.press_many([(0, "left"), (0, "y"), (1, "left"), (1, "y")])
+    await pads.press(1, "start")
+    await next_vblank(dut)
+    await pads.press(0, "right")
+    for _ in range(18):
+        await next_vblank(dut)
+
+    # Flashing: every frame has all 48 pips lit or none, and both are seen.
+    seen = set()
+    for f in range(10):
+        lit = pips(await capture_frame(dut, "frame_match"))
+        flat = sum(lit, [])
+        assert all(flat) or not any(flat), f"frame {f}: pips {lit}"
+        seen.add(flat[0])
+    assert seen == {True, False}, "pips did not flash"
+
+    # About 2 s after the win (127 frames) the scores are back to 0.
+    for _ in range(120):
+        await next_vblank(dut)
+    px = await capture_frame(dut, "frame_match_reset")
+    assert not any(sum(pips(px), [])), "scores not reset"
+    assert all(dut.user_project.core.score[p].value == 0 for p in range(4))
+
+
 # ---------------------------------------------------------------------------
 # Reference model: the game as the RTL plays it, but drawing trails by
 # walking them cell by cell rather than the RTL's modular range test.
@@ -322,7 +361,7 @@ class Model:
             self.round = OVER
             if left:
                 self.winner = left[0]
-                self.score[self.winner] = min(7, self.score[self.winner] + 1)
+                self.score[self.winner] = min(12, self.score[self.winner] + 1)
 
     def vblank(self):
         """What the RTL's G_IDLE does on ev_tick, at speed 3 (a move a frame)."""

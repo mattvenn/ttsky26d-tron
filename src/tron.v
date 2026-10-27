@@ -118,6 +118,10 @@ module tron (
   reg  [1:0] hd[0:3];
   reg  [3:0] alive;
   reg  [3:0] score[0:3];   // rounds won, up to 12
+  // Someone has won 12: every pip flashes for this many frames, then all
+  // the scores go back to 0. The next round waits for it.
+  localparam [6:0] MATCH_FRAMES = 7'd127;  // about 2 s
+  reg  [6:0] match_end;
 
   reg  [1:0] round;
   reg  [1:0] winner;
@@ -534,6 +538,7 @@ module tron (
       has_winner    <= 1'b0;
       winner        <= 2'd0;
       frame_cnt     <= 4'd0;
+      match_end     <= 7'd0;
       tdiv          <= 3'd0;
       count         <= 7'd0;
       building      <= 1'b0;
@@ -582,6 +587,11 @@ module tron (
         G_IDLE: if (ev_tick) begin
           frame_cnt <= frame_cnt + 4'd1;
           pressed <= 1'b0;
+          if (match_end != 7'd0) begin
+            match_end <= match_end - 7'd1;
+            if (match_end == 7'd1)
+              for (i2 = 0; i2 < 4; i2 = i2 + 1) score[i2] <= 4'd0;
+          end
           if (pressed || any_press) idle <= 11'd0;
           else if (idle != 11'h7ff) idle <= idle + 11'd1;
           // Attract rounds follow each other a second apart.
@@ -607,7 +617,7 @@ module tron (
             round         <= R_PLAY;
             start_pending <= 1'b0;
             tdiv          <= tick_period - 3'd1;
-          end else if (start_pending && round == R_OVER) begin
+          end else if (start_pending && round == R_OVER && match_end == 7'd0) begin
             gstate        <= G_INIT;
             gp            <= 2'd0;
             init_round    <= R_PLAY;
@@ -768,6 +778,8 @@ module tron (
             winner     <= alive_idx;
             if (n_alive == 3'd1 && score[alive_idx] != 4'd12)
               score[alive_idx] <= score[alive_idx] + 4'd1;
+            if (n_alive == 3'd1 && score[alive_idx] == 4'd11)
+              match_end <= MATCH_FRAMES;
           end
           gstate <= G_IDLE;
         end
@@ -929,8 +941,9 @@ module tron (
     sp_x_r <= sp_x[7:0];
     sp_on  <= (vpos >= 10'd594) && (vpos < 10'd598) && (sp_x < 11'd192);
   end
+  // While a match ends every pip lights, flashing.
   wire        pip = sp_on && (sp_x_r[3:0] >= 4'd2) && (sp_x_r[3:0] < 4'd14) &&
-                    (sp_x_r[7:4] < score[sp_p_r]);
+                    (match_end != 7'd0 ? frame_cnt[2] : sp_x_r[7:4] < score[sp_p_r]);
 
   // Bottom right corner, past the last player's pips: which controls are in
   // use. White for the Gamepad Pmod, blue for the Commander, nothing while
