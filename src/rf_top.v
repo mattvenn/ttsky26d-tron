@@ -29,6 +29,11 @@ module rf_top (
 
   reg [31:0] storage[0:31];
 
+  // The macro powers up with random contents and the design never relies on
+  // them, but in simulation they start as X and gate level spreads it.
+  integer k;
+  initial for (k = 0; k < 32; k = k + 1) storage[k] = 32'd0;
+
   initial begin
     integer i;
     for (i = 0; i < 32; i = i + 1) begin
