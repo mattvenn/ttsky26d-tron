@@ -21,9 +21,9 @@ WRAPPER    = $(TT_TOOLS)/fpga/tt_fpga_top.v
 
 SOURCES  = src/tt_um_mattvenn_tron.v \
            src/tron.v \
-           src/trail_drum.v \
-           src/hvsync_generator.v \
-           src/gamepad_pmod.v
+           fpga/rf_top_fpga.v \
+           src/input_select.v \
+           src/hvsync_generator.v
 
 BUILD    = build
 

@@ -181,8 +181,8 @@ async def test_attract(dut):
     # Empty cells are black with a dark blue grid on the cell edges.
     assert cell(px, 0, 0) == BLACK
     assert px[0][0] == GRID and px[16][5] == GRID and px[5][16] == GRID
-    # Nothing in the score strip yet.
-    assert all(p == BLACK for row in px[592:600] for p in row)
+    # Nothing in the score strip yet, apart from the mode mark at its right end.
+    assert all(p == BLACK for row in px[592:600] for p in row[:792])
 
 
 @cocotb.test()
@@ -233,7 +233,7 @@ async def test_round(dut):
 # Reference model: the game as the RTL plays it, but drawing trails by
 # walking them cell by cell rather than the RTL's modular range test.
 
-GW, GH, RING = 50, 37, 64
+GW, GH, RING = 50, 37, 66
 STEP = [(1, 0), (0, 1), (-1, 0), (0, -1)]  # right, down, left, up
 START_DIRS = [0, 1, 2, 3]
 READY, PLAY, OVER = range(3)
@@ -490,3 +490,36 @@ async def test_attract_exit(dut):
     # Player 0 went straight on: three moves right of its start.
     for x in range(12, 15):
         assert cell(px, x, 9) in (COLOURS[0], WHITE), f"player 0 at x={x}"
+    assert px[595][796] == WHITE, "mode mark should show the Gamepad Pmod"
+
+
+@cocotb.test()
+async def test_commander(dut):
+    """No Gamepad Pmod: play from the TT Commander's keys 1-8 on ui_in, two
+    per player. Speed is read from ui_in[1:0] during reset."""
+    if os.environ.get("GATES") == "yes":
+        dut._log.info("skipped at gate level: relies on the shortened Pmod timeout")
+        return
+    await setup(dut, speed=3)        # held in reset with ui_in = 3: speed 3
+    dut.ui_in.value = 0              # then every key released
+    for _ in range(3):               # past the 2 frame Pmod timeout
+        await next_vblank(dut)
+
+    async def press(bits):
+        dut.ui_in.value = bits
+        await Timer(1000 * CLK_NS, unit="ns")
+        dut.ui_in.value = 0
+        await Timer(1000 * CLK_NS, unit="ns")
+
+    await next_vblank(dut)
+    await press(0b0000_0001)         # key 1: cyan joins
+    await press(0b0000_0011)         # keys 1 and 2 together: start
+    await next_vblank(dut)           # playing
+    await press(0b0000_0010)         # key 2: cyan turns right, now heading down
+    for _ in range(5):
+        await next_vblank(dut)
+    px = await capture_frame(dut, "frame_commander")
+    for k in range(6):
+        assert cell(px, 12, 9 + k) in (COLOURS[0], WHITE), f"player 0 at y={9 + k}"
+    assert cell(px, 13, 9) == BLACK, "player 0 did not turn"
+    assert px[595][796] == (0, 1, 3), "mode mark should show the Commander"

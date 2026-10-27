@@ -34,10 +34,12 @@ if [ -n "$TILES" ]; then
     sed -E "s/^(  tiles: *)\"[0-9]x[0-9]\"/\1\"$TILES\"/" info.yaml > /tmp/info.yaml
     cp info.yaml /tmp/info.yaml.orig
     cp /tmp/info.yaml info.yaml
-    trap "cp /tmp/info.yaml.orig /work/info.yaml" EXIT
 fi
 grep -E "^  tiles:" info.yaml
 python3 tt/tt_tool.py --create-user-config
+# Put info.yaml back straight away, not at the end of the run, so edits
+# made while LibreLane runs are not overwritten.
+[ -n "$TILES" ] && cp /tmp/info.yaml.orig info.yaml
 # tt_tool --harden wants a git remote for its commit record; this is the
 # librelane call it makes.
 rm -rf runs/wokwi && mkdir -p runs/wokwi

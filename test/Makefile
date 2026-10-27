@@ -5,13 +5,16 @@
 SIM ?= icarus
 TOPLEVEL_LANG ?= verilog
 SRC_DIR = $(PWD)/../src
-PROJECT_SOURCES = tt_um_mattvenn_tron.v tron.v trail_drum.v hvsync_generator.v gamepad_pmod.v
+PROJECT_SOURCES = tt_um_mattvenn_tron.v input_select.v tron.v rf_top.v hvsync_generator.v
 
 ifneq ($(GATES),yes)
 
 # RTL simulation:
 SIM_BUILD				= sim_build/rtl
 VERILOG_SOURCES += $(addprefix $(SRC_DIR)/,$(PROJECT_SOURCES))
+# Decide "no Gamepad Pmod, so the Commander" after 2 frames rather than 2 s; the
+# Gamepads model in test.py reports every 0.5 ms or so.
+COMPILE_ARGS    += -DPMOD_TIMEOUT_FRAMES=2
 
 else
 

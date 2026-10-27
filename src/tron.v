@@ -10,7 +10,8 @@
 // The playfield is a 50x37 grid of 16 px cells (37 rows = 592 lines; the last
 // 8 lines are a score strip). Edges wrap on both axes. There is no
 // framebuffer. Each trail is a list of corner points in one shared 64 entry
-// ring (trail_drum), and every cell's owner is worked out on the fly:
+// ring in a register file (rf_top), and every cell's owner is worked out on
+// the fly:
 //
 //   - A corner entry is {owner, sign, coordinate}: where the player turned,
 //     stored as just the coordinate that changed (consecutive corners share
@@ -39,6 +40,8 @@ module tron (
     input  wire [3:0] btn_right_in,
     input  wire       btn_start_in,  // any controller's start button
     input  wire [3:0] present_in,    // players that have a controller
+    input  wire [1:0] input_mode,    // shown in the score strip: 1 Pmod, 2 Commander
+    output wire       frame_tick,    // once a frame, for input_select's timeout
     output reg        hsync,
     output reg        vsync,
     output reg  [1:0] r,
@@ -55,9 +58,9 @@ module tron (
   localparam [1:0] R_READY = 2'd0, R_PLAY = 2'd1, R_OVER = 2'd2;
 
   localparam [3:0] G_IDLE = 4'd0, G_INIT = 4'd1, G_TURN = 4'd2, G_QUERY = 4'd3,
-                   G_WAIT = 4'd4, G_HEADON = 4'd5, G_MOVE = 4'd6, G_SCORE = 4'd7,
+                   G_WAIT = 4'd4, G_DROP = 4'd5, G_MOVE = 4'd6, G_SCORE = 4'd7,
                    G_BOTP = 4'd8, G_BOTQ = 4'd9, G_BOTW = 4'd10, G_BOTD = 4'd11,
-                   G_WRW = 4'd12, G_TURN2 = 4'd13, G_QPREP = 4'd14;
+                   G_RMW1 = 4'd12, G_TURN2 = 4'd13, G_QPREP = 4'd14, G_RMW2 = 4'd15;
 
   // Controls are registered on the way in: the gamepad decoder's "is
   // anything plugged in" compare is otherwise in front of the turn queue.
@@ -106,6 +109,8 @@ module tron (
     ev_row  <= nv[9:4];
   end
 
+  assign frame_tick = ev_tick;
+
   // ---------------------------------------------------------- game state
 
   reg  [5:0] hx[0:3];
@@ -119,37 +124,52 @@ module tron (
   reg        has_winner;
   reg  [3:0] frame_cnt;
 
-  reg  [5:0] wptr;   // next ring slot to write
-  reg  [6:0] count;  // valid entries, saturates at 64
+  // Memory: one 32 word x 32 bit register file (Sylvain Munaut's rf_top
+  // macro: one write port, two read ports, reads registered).
+  //   words 0-21   the trail ring, 3 corners of 9 bits a word: 66 corners
+  //   words 22-31  two line buffers, 5 words of 10 cells of 3 bits each
+  localparam [4:0] TW   = 5'd22;   // trail words
+  localparam [6:0] RING = 7'd66;   // corners
+  localparam [4:0] LB_A = 5'd22, LB_B = 5'd27;
 
-  // ------------------------------------------------------------ trail ring
+  reg  [4:0]  o_w, n_w;   // oldest corner, and the next slot to write: word
+  reg  [1:0]  o_l, n_l;   // and lane in the word
+  reg  [6:0]  count;      // corners in the ring, saturates at RING
 
-  reg         d_wr;       // held until d_wack
-  reg  [5:0]  d_wslot;
-  reg  [8:0]  d_wdata;
-  wire        d_wack;
-  wire [5:0]  rot;        // the slot at the drum's output this cycle
-  wire [8:0]  drum_out;
+  reg         rf_we;
+  reg  [4:0]  rf_waddr;
+  reg  [31:0] rf_wdata;
+  wire [4:0]  rf_ra_addr, rf_rb_addr;
+  wire [31:0] rf_ra, rf_rb;
 
-  trail_drum ring (
-      .clk  (clk),
-      .rst_n(rst_n),
-      .wr   (d_wr),
-      .wslot(d_wslot),
-      .wdata(d_wdata),
-      .wack (d_wack),
-      .rot  (rot),
-      .out  (drum_out)
+  rf_top rf (
+      .w_data (rf_wdata),
+      .w_addr (rf_waddr),
+      .w_ena  (rf_we),
+      .ra_addr(rf_ra_addr),
+      .rb_addr(rf_rb_addr),
+      .ra_data(rf_ra),
+      .rb_data(rf_rb),
+      .clk    (clk)
   );
+
+  function [8:0] lane;
+    input [26:0] w;
+    input [1:0]  l;
+    lane = (l == 2'd0) ? w[8:0] : (l == 2'd1) ? w[17:9] : w[26:18];
+  endfunction
+
+  wire _unused_rf = &{rf_ra[31:30], rf_rb[31:27], 1'b0};  // words use 30 and 27 bits
 
   // ---------------------------------------------------------- query engine
   //
   // Is cell q on the segment that leaves corner a along an axis, plus or
   // minus, and ends at b? Along the axis, the distance from a to q must be
   // no more than from a to b, both taken modulo the grid so wrapped segments
-  // work. Pipelined over four stages to make 40 MHz on the iCE40:
+  // work. Pipelined over five stages to make 40 MHz on the iCE40:
   //
-  //   S0  a corner comes off the drum (or a head); pick a, b and the owner
+  //   R   the word arrives from the register file; register the corner
+  //   S0  pick a, b and the owner, for a corner or a head
   //   S1  on_line, and the two raw distances u (a to q) and v (a to b)
   //   S2  wrap u and v into the grid
   //   S3  compare; record a hit
@@ -163,13 +183,16 @@ module tron (
   reg        e_start;
   reg  [5:0] e_sx, e_sy;  // cell to ask about, sampled on e_start
 
-  reg        e_align;     // waiting for the oldest corner to come round
   reg        e_run;
   reg  [6:0] e_s;         // next item: entries 0..count-1, then heads 0..3
-  reg  [5:0] e_base;      // oldest entry
+  reg  [4:0] e_w;         // the corner being read: word
+  reg  [1:0] e_l, e_rl;   // and lane, as issued and as its word arrives (R)
   reg  [5:0] e_qx, e_qy;
-  reg        e_pv, e_phead, e_plast;  // S0: the item whose data arrives this cycle
+  reg        e_rv, e_rhead, e_rlast;  // R: the item whose word arrives this cycle
+  reg  [1:0] e_rp;
+  reg        e_pv, e_phead, e_plast;  // S0: the item being used this cycle
   reg  [1:0] e_pp;
+  reg  [8:0] ent;                     // S0: the corner, registered in R
   reg        e_done, e_hit;
   reg  [1:0] e_owner;
   // Each player's latest corner so far, starting from its tail:
@@ -183,11 +206,12 @@ module tron (
 
   // S0 operands. A stored corner closes the segment from its owner's
   // previous corner; a head closes the live segment from the newest one.
-  wire [1:0]  eo    = drum_out[8:7];
+  wire [8:0]  ent_in = lane(rf_rb[26:0], e_rl);  // outside the clocked block, for yosys
+  wire [1:0]  eo    = ent[8:7];
   wire [13:0] eprev = prev[eo];
   // The corner itself: the previous one with the coordinate along its axis replaced.
-  wire [5:0]  e_bx  = eprev[13] ? eprev[11:6] : drum_out[5:0];
-  wire [5:0]  e_by  = eprev[13] ? drum_out[5:0] : eprev[5:0];
+  wire [5:0]  e_bx  = eprev[13] ? eprev[11:6] : ent[5:0];
+  wire [5:0]  e_by  = eprev[13] ? ent[5:0] : eprev[5:0];
   wire [13:0] s0_a  = e_phead ? prev[e_pp] : eprev;
   wire [5:0]  s0_bx = e_phead ? hx[e_pp] : e_bx;
   wire [5:0]  s0_by = e_phead ? hy[e_pp] : e_by;
@@ -222,9 +246,9 @@ module tron (
   always @(posedge clk) begin
     e_done <= 1'b0;
     if (!rst_n) begin
-      e_align <= 1'b0;
       e_run   <= 1'b0;
       e_pv    <= 1'b0;
+      e_rv    <= 1'b0;
       e_hit   <= 1'b0;
       s1_v    <= 1'b0;
       s1_last <= 1'b0;
@@ -233,13 +257,14 @@ module tron (
       s3_v    <= 1'b0;
       s3_last <= 1'b0;
     end else if (e_start) begin
-      e_align <= 1'b1;
-      e_run   <= 1'b0;
+      e_run   <= 1'b1;
       e_s     <= 7'd0;
-      e_base  <= wptr - count[5:0];
+      e_w     <= o_w;
+      e_l     <= o_l;
       e_qx    <= e_sx;
       e_qy    <= e_sy;
       e_pv    <= 1'b0;
+      e_rv    <= 1'b0;
       e_hit   <= 1'b0;
       for (ie = 0; ie < 4; ie = ie + 1) prev[ie] <= tail[ie];
       s1_v    <= 1'b0;
@@ -249,20 +274,28 @@ module tron (
       s3_v    <= 1'b0;
       s3_last <= 1'b0;
     end else begin
-      // Issue slot base+s while the drum has the slot before it at the
-      // output, so it is at the output when S0 looks. So start two before.
-      if (e_align && rot == e_base - 6'd2) begin
-        e_align <= 1'b0;
-        e_run   <= 1'b1;
-      end
-      e_pv <= e_run;
+      // Issue: rf_rb_addr is e_w; the word arrives a clock later, in S0.
+      if (rmw_req) e_w <= n_w;  // engine idle: the game tick reads a word
+      e_rv <= e_run;
       if (e_run) begin
-        e_phead <= (e_s >= count);
-        e_pp    <= e_hidx;
-        e_plast <= (e_s == count + 7'd3);
+        e_rl <= e_l;
+        if (e_l == 2'd2) begin
+          e_l <= 2'd0;
+          e_w <= (e_w == TW - 5'd1) ? 5'd0 : e_w + 5'd1;
+        end else e_l <= e_l + 2'd1;
+        e_rhead <= (e_s >= count);
+        e_rp    <= e_hidx;
+        e_rlast <= (e_s == count + 7'd3);
         e_s     <= e_s + 7'd1;
         if (e_s == count + 7'd3) e_run <= 1'b0;
       end
+
+      // R
+      e_pv    <= e_rv;
+      e_phead <= e_rhead;
+      e_pp    <= e_rp;
+      e_plast <= e_rlast;
+      ent     <= ent_in;
 
       // S0
       s1_v     <= s0_v;
@@ -274,7 +307,7 @@ module tron (
       s1_bx    <= s0_bx;
       s1_by    <= s0_by;
       s1_o     <= s0_o;
-      if (e_pv && !e_phead) prev[eo] <= {~eprev[13], drum_out[6], e_bx, e_by};
+      if (e_pv && !e_phead) prev[eo] <= {~eprev[13], ent[6], e_bx, e_by};
 
       // S1
       s2_v     <= s1_v && s1_on;
@@ -310,8 +343,10 @@ module tron (
   // back buffer is copied to the front. Shifting rather than addressing
   // keeps every wire local: an addressed pair needed a 50-way read mux and
   // write decode, and the ASIC router could not fit them in 3x2.
-  reg  [149:0] lb_back, lb_front;
-  reg          lb_rot;    // the front buffer moves on a cell this clock
+  reg          front;     // which register file line buffer is on screen: 0 LB_A
+  reg  [26:0]  bacc;      // the builder's cells so far for the next word
+  reg  [3:0]   bcnt;      // ... how many
+  reg  [2:0]   bgroup;    // ... and which word of the back buffer
   wire         lb_write;  // the builder has a cell for the back buffer
   reg          building;
   reg  [5:0]   brow, bcol;
@@ -320,13 +355,25 @@ module tron (
   // ------------------------------------------------------------ game tick
 
   reg  [3:0] gstate;
-  reg  [3:0] gret;        // where G_WRW goes once the drum has taken a write
-  reg        drop;        // this write overwrites the oldest corner
-  wire [1:0]  drop_o = drum_out[8:7];
+  reg  [3:0] gret;        // where G_RMW2 goes once the corner is written
+  reg  [8:0] t_ent;       // the corner G_RMW1/2 adds to the ring
+  reg        rmw_req;     // point the idle engine's read port at word n_w
+  reg        rmw_ph;
+  // Adding a corner reads its word (G_RMW1), puts it in its lane and writes
+  // the word back (G_RMW2). When the ring is full that lane held the oldest
+  // corner, which becomes its owner's tail.
+  reg  [26:0] rmw_word;   // the word read, registered before it's used
+  wire [8:0]  old    = lane(rmw_word, n_l);
+  wire [26:0] merged = (n_l == 2'd0) ? {rmw_word[26:9], t_ent} :
+                       (n_l == 2'd1) ? {rmw_word[26:18], t_ent, rmw_word[8:0]} :
+                                       {t_ent, rmw_word[17:0]};
+  reg  [8:0]  old_r;      // the corner overwritten, for G_DROP
+  reg         full_r;
+  wire [1:0]  drop_o = old_r[8:7];
   wire [13:0] drop_t = tail[drop_o];
-  wire [13:0] drop_tail = {~drop_t[13], drum_out[6],
-                           drop_t[13] ? drop_t[11:6] : drum_out[5:0],
-                           drop_t[13] ? drum_out[5:0] : drop_t[5:0]};
+  wire [13:0] drop_tail = {~drop_t[13], old_r[6],
+                           drop_t[13] ? drop_t[11:6] : old_r[5:0],
+                           drop_t[13] ? old_r[5:0] : drop_t[5:0]};
   wire _unused_drop = drop_t[12];  // the old tail's sign: its segment is gone
   reg        t_do;        // G_TURN to G_TURN2: this player turns,
   reg  [1:0] t_dir;       // to this direction,
@@ -399,14 +446,12 @@ module tron (
     endcase
   end
 
-  // Where each head moves next, with wrap. Registered (tx_r, ty_r) once the
-  // turns are applied: nothing in the tick is in a hurry, and the iCE40 does
-  // not make 40 MHz if this feeds the collision and scoring logic directly.
+  // Where each head moves next, with wrap. Only player gp's is registered
+  // (tx_gp, ty_gp, in G_QPREP for G_QUERY); the head-on check and the move
+  // use these directly, each in a state of its own.
   reg [5:0] tx[0:3];
   reg [5:0] ty[0:3];
-  reg [5:0] tx_r[0:3];
-  reg [5:0] ty_r[0:3];
-  reg  [5:0] tx_gp, ty_gp;  // tx_r[gp], registered in G_QPREP for G_QUERY
+  reg  [5:0] tx_gp, ty_gp;
   always @(*) begin
     for (i0 = 0; i0 < 4; i0 = i0 + 1) begin
       tx[i0] = hx[i0];
@@ -420,19 +465,27 @@ module tron (
     end
   end
 
+  // Also registered, for G_QUERY and G_BOTQ (G_QPREP and G_BOTP give them
+  // the cycle): is player gp alive, and a bot.
+  reg gp_alive, gp_bot;
   always @(posedge clk) begin
-    tx_gp <= tx_r[gp];
-    ty_gp <= ty_r[gp];
+    tx_gp    <= tx[gp];
+    ty_gp    <= ty[gp];
+    gp_alive <= alive[gp];
+    gp_bot   <= alive[gp] && is_bot[gp];
   end
 
-  // Two heads moving into the same cell both die.
-  reg [3:0] headon;
+  // Two heads moving into the same cell both die. Rather than compare where
+  // they're going, let them go and then look for two heads in one cell:
+  // registered positions only, no arithmetic in front of the compare.
+  reg [3:0] shared, shared_r;
+  always @(posedge clk) shared_r <= shared;
   always @(*) begin
     for (i1 = 0; i1 < 4; i1 = i1 + 1) begin
-      headon[i1] = 1'b0;
+      shared[i1] = 1'b0;
       for (j1 = 0; j1 < 4; j1 = j1 + 1)
-        if (i1 != j1 && alive[i1] && alive[j1] && tx_r[i1] == tx_r[j1] && ty_r[i1] == ty_r[j1])
-          headon[i1] = 1'b1;
+        if (i1 != j1 && alive[i1] && alive[j1] && hx[i1] == hx[j1] && hy[i1] == hy[j1])
+          shared[i1] = 1'b1;
     end
   end
 
@@ -466,10 +519,13 @@ module tron (
   always @(posedge clk) begin
     e_start <= 1'b0;
     b_start <= 1'b0;
+    rf_we   <= 1'b0;
+    rmw_req <= 1'b0;
 
     if (!rst_n) begin
       gstate        <= G_IDLE;
-      d_wr          <= 1'b0;
+      rf_we         <= 1'b0;
+      front         <= 1'b0;
       round         <= R_READY;
       need_init     <= 1'b1;
       start_pending <= 1'b0;
@@ -479,7 +535,6 @@ module tron (
       winner        <= 2'd0;
       frame_cnt     <= 4'd0;
       tdiv          <= 3'd0;
-      wptr          <= 6'd0;
       count         <= 7'd0;
       building      <= 1'b0;
       btn_left_d    <= 4'b0;
@@ -563,7 +618,6 @@ module tron (
               gstate <= G_BOTP;
               gp     <= 2'd0;
               bstep  <= 2'd0;
-              kill   <= 4'b0;
             end else begin
               tdiv <= tdiv - 3'd1;
             end
@@ -578,8 +632,11 @@ module tron (
           hy[gp]    <= sp[5:0];
           // The start point is the trail's tail; the drum is empty.
           tail[gp]  <= {sp[12], sp[13], sp[11:0]};
-          wptr      <= 6'd0;
           count     <= 7'd0;
+          o_w       <= 5'd0;
+          o_l       <= 2'd0;
+          n_w       <= 5'd0;
+          n_l       <= 2'd0;
           gp        <= gp + 2'd1;
           if (gp == 2'd3) begin
             gstate     <= G_IDLE;
@@ -588,6 +645,7 @@ module tron (
             has_winner <= 1'b0;
             tdiv       <= tick_period - 3'd1;
           end
+          kill <= 4'b0;
         end
 
         // Bots choose their turn by asking the query engine about the cells
@@ -595,7 +653,7 @@ module tron (
         G_BOTP: gstate <= G_BOTQ;
 
         G_BOTQ: begin
-          if (alive[gp] && is_bot[gp]) begin
+          if (gp_bot) begin
             e_start <= 1'b1;
             e_sx    <= bot_cell[11:6];
             e_sy    <= bot_cell[5:0];
@@ -642,26 +700,17 @@ module tron (
           t_x    <= hx[gp];
           t_y    <= hy[gp];
           gstate <= G_TURN2;
-          // Targets for the players already turned. The last one is caught
-          // up in G_QPREP, before any query.
-          for (i2 = 0; i2 < 4; i2 = i2 + 1) begin
-            tx_r[i2] <= tx[i2];
-            ty_r[i2] <= ty[i2];
-          end
         end
 
         G_TURN2: begin
           if (t_do) begin
             hd[gp]    <= t_dir;
-            d_wr      <= 1'b1;
-            d_wslot   <= wptr;
             // Store the coordinate that changed: x if the trail arrived
             // moving horizontally, which it did if it now leaves vertically.
-            d_wdata   <= {gp, t_dir[1], t_dir[0] ? t_x : t_y};
-            drop      <= (count == 7'd64);
-            wptr      <= wptr + 6'd1;
-            if (count != 7'd64) count <= count + 7'd1;
-            gstate    <= G_WRW;
+            t_ent     <= {gp, t_dir[1], t_dir[0] ? t_x : t_y};
+            rmw_req   <= 1'b1;
+            rmw_ph    <= 1'b0;
+            gstate    <= G_RMW1;
             gret      <= (gp == 2'd3) ? G_QPREP : G_TURN;
           end else gstate <= (gp == 2'd3) ? G_QPREP : G_TURN;
           tq0[gp] <= tq1[gp];
@@ -671,50 +720,47 @@ module tron (
 
         // Is the cell each live head is about to enter already taken?
         // G_QPREP gives tx_gp a cycle to catch up with gp.
-        G_QPREP: begin
-          for (i2 = 0; i2 < 4; i2 = i2 + 1) begin
-            tx_r[i2] <= tx[i2];
-            ty_r[i2] <= ty[i2];
-          end
-          gstate <= G_QUERY;
-        end
+        G_QPREP: gstate <= G_QUERY;
 
         G_QUERY: begin
-          if (alive[gp]) begin
+          if (gp_alive) begin
             e_start <= 1'b1;
             e_sx    <= tx_gp;
             e_sy    <= ty_gp;
             gstate  <= G_WAIT;
           end else begin
             gp     <= gp + 2'd1;
-            gstate <= (gp == 2'd3) ? G_HEADON : G_QPREP;
+            gstate <= (gp == 2'd3) ? G_MOVE : G_QPREP;
           end
         end
 
         G_WAIT: if (e_done) begin
           for (i2 = 0; i2 < 4; i2 = i2 + 1) if (e_hit && gp == i2[1:0]) kill[i2] <= 1'b1;
           gp     <= gp + 2'd1;
-          gstate <= (gp == 2'd3) ? G_HEADON : G_QPREP;
-        end
-
-        G_HEADON: begin
-          kill   <= kill | headon;
-          gstate <= G_MOVE;
+          gstate <= (gp == 2'd3) ? G_MOVE : G_QPREP;
         end
 
         G_MOVE: begin
           for (i2 = 0; i2 < 4; i2 = i2 + 1)
             if (alive[i2] && !kill[i2]) begin
-              hx[i2] <= tx_r[i2];
-              hy[i2] <= ty_r[i2];
+              hx[i2] <= tx[i2];
+              hy[i2] <= ty[i2];
             end
           alive  <= alive & ~kill;
+          kill   <= 4'b0;  // ready for the next move
           gstate <= G_SCORE;
           gp     <= 2'd0;
         end
 
+        // gp counts the steps: 0 shared_r catches up with the move, 1 heads
+        // that met die, 2 n_alive catches up, 3 the result.
         G_SCORE: if (gp == 2'd0) begin
-          gp <= 2'd1;  // let n_alive see the new alive
+          gp <= 2'd1;
+        end else if (gp == 2'd1) begin
+          alive <= alive & ~shared_r;
+          gp    <= 2'd2;
+        end else if (gp == 2'd2) begin
+          gp <= 2'd3;
         end else begin
           if (n_alive <= 3'd1) begin
             round      <= R_OVER;
@@ -726,27 +772,71 @@ module tron (
           gstate <= G_IDLE;
         end
 
-        // When the drum is full the write overwrites the oldest corner, which
-        // is on the drum's output right now: its owner's trail now starts there.
-        G_WRW: if (d_wack) begin
-          d_wr   <= 1'b0;
+        // A clock for e_w to load n_w, then one for the read.
+        G_RMW1: begin
+          rmw_ph <= ~rmw_ph;
+          if (rmw_ph) gstate <= G_RMW2;
+        end
+
+        G_RMW2: if (!rmw_ph) begin
+          rmw_word <= rf_rb[26:0];
+          rmw_ph   <= 1'b1;
+        end else begin
+          rf_we    <= 1'b1;
+          rf_waddr <= n_w;
+          rf_wdata <= {5'b0, merged};
+          old_r    <= old;
+          full_r   <= (count == RING);
+          if (count == RING) begin
+            o_w <= n_w;  // full: the oldest is the next one along
+            o_l <= n_l;
+            if (n_l == 2'd2) begin
+              o_l <= 2'd0;
+              o_w <= (n_w == TW - 5'd1) ? 5'd0 : n_w + 5'd1;
+            end else o_l <= n_l + 2'd1;
+          end else count <= count + 7'd1;
+          if (n_l == 2'd2) begin
+            n_l <= 2'd0;
+            n_w <= (n_w == TW - 5'd1) ? 5'd0 : n_w + 5'd1;
+          end else n_l <= n_l + 2'd1;
+          gstate <= G_DROP;
+        end
+
+        // Full ring: the overwritten corner becomes its owner's tail.
+        G_DROP: begin
+          if (full_r) tail[drop_o] <= drop_tail;
           gstate <= gret;
-          if (drop) tail[drop_o] <= drop_tail;
         end
 
         default: gstate <= G_IDLE;
       endcase
 
-      // ---- row builder: fill the back buffer one cell at a time
+      // ---- row builder: work out the next row a cell at a time, writing
+      // each 10 cells to the back line buffer as a word
       if (ev_row0 || ev_swap) begin
+        if (ev_swap) front <= ~front;
         // Row ev_row is going on screen, so build the one after it.
         if (ev_row0 || ev_row != GH - 6'd1) begin
           building <= 1'b1;
           brow     <= ev_row0 ? 6'd0 : ev_row + 6'd1;
           bcol     <= 6'd0;
+          bcnt     <= 4'd0;
+          bgroup   <= 3'd0;
           b_start  <= 1'b1;
         end
       end else if (lb_write) begin
+        if (bcnt == 4'd9) begin
+          // The game tick's writes are all in vertical blank, done before
+          // row 0 is built, so the write port is free.
+          rf_we    <= 1'b1;
+          rf_waddr <= (front ? LB_A : LB_B) + {2'b00, bgroup};
+          rf_wdata <= {2'b00, bacc, e_hit, e_owner};
+          bcnt     <= 4'd0;
+          bgroup   <= bgroup + 3'd1;
+        end else begin
+          bacc <= {bacc[23:0], e_hit, e_owner};
+          bcnt <= bcnt + 4'd1;
+        end
         if (bcol == GW - 6'd1) building <= 1'b0;
         else begin
           bcol    <= bcol + 6'd1;
@@ -767,14 +857,39 @@ module tron (
   wire [5:0] cy = vpos[9:4];
   assign lb_write = building && e_done && !ev_row0 && !ev_swap;
 
+  // The front line buffer is read a word (10 cells) at a time on read port
+  // A into disp, which moves on a cell every 16 pixels. The next word is
+  // always on port A's output by the time it's needed: dnext is the group
+  // after the one showing, or the first during horizontal blank.
+  reg  [29:0] disp;
+  reg  [2:0]  dgroup;
+  reg  [3:0]  dcell;
+  reg         lb_rot;     // last pixel of a cell next
+  reg         lb_line;    // first pixel of a line next
+  wire [2:0]  dnext = (hpos >= 11'd800) ? 3'd0 : dgroup + 3'd1;
+  assign rf_ra_addr = (front ? LB_B : LB_A) + {2'b00, dnext};
+  assign rf_rb_addr = e_w;  // the read-modify-write borrows it via rmw_req
+
   always @(posedge clk) begin
-    lb_rot <= (hpos[3:0] == 4'd14) && (hpos < 11'd800);  // last pixel of a cell next
-    if (lb_write) lb_back <= {lb_back[146:0], e_hit, e_owner};
-    if (ev_swap) lb_front <= lb_back;
-    else if (lb_rot) lb_front <= {lb_front[146:0], lb_front[149:147]};
+    lb_rot  <= (hpos[3:0] == 4'd14) && (hpos < 11'd800);
+    lb_line <= (hpos == 11'd1054);
+    if (lb_line) begin
+      disp   <= rf_ra[29:0];
+      dgroup <= 3'd0;
+      dcell  <= 4'd0;
+    end else if (lb_rot) begin
+      if (dcell == 4'd9) begin
+        disp   <= rf_ra[29:0];
+        dgroup <= dgroup + 3'd1;
+        dcell  <= 4'd0;
+      end else begin
+        disp  <= {disp[26:0], 3'b000};
+        dcell <= dcell + 4'd1;
+      end
+    end
   end
 
-  wire [2:0] lbcell = lb_front[149:147];  // cell hpos / 16
+  wire [2:0] lbcell = disp[29:27];  // cell hpos / 16
 
   reg is_head, head_joined;
   always @(*) begin
@@ -817,16 +932,24 @@ module tron (
   wire        pip = sp_on && (sp_x_r[3:0] >= 4'd2) && (sp_x_r[3:0] < 4'd14) &&
                     (sp_x_r[7:4] < score[sp_p_r]);
 
+  // Bottom right corner, past the last player's pips: which controls are in
+  // use. White for the Gamepad Pmod, blue for the Commander, nothing while
+  // deciding.
+  reg mode_mark;
+  always @(posedge clk)
+    mode_mark <= (vpos >= 10'd594) && (vpos < 10'd598) && (hpos >= 11'd792) && (hpos < 11'd800);
+
   // Two pixel stages: the lookups (line buffer, heads, pips) are registered,
   // then the colour is chosen and registered. The generator's syncs are
   // already one register behind hpos, so they get one more to match.
-  reg       px_on, px_strip, px_pip, px_head, px_joined, px_grid;
+  reg       px_on, px_strip, px_pip, px_mark, px_head, px_joined, px_grid;
   reg [1:0] px_p;
   reg [2:0] px_cell;
   always @(posedge clk) begin
     px_on    <= display_on;
     px_strip <= (vpos >= 10'd592);
     px_pip   <= pip;
+    px_mark  <= mode_mark;
     px_p     <= sp_p_r;
     px_head  <= is_head;
     px_joined <= head_joined;
@@ -839,7 +962,9 @@ module tron (
   reg [5:0] rgb;
   always @(*) begin
     if (!px_on) rgb = BLACK;
-    else if (px_strip) rgb = px_pip ? pcol(px_p) : BLACK;
+    else if (px_strip) rgb = px_pip ? pcol(px_p) :
+                             !px_mark ? BLACK :
+                             input_mode[0] ? WHITE : input_mode[1] ? 6'b00_01_11 : BLACK;
     else if (px_head) rgb = (round == R_READY && !px_joined && frame_cnt[3]) ? pcol(px_cell[1:0]) : WHITE;
     else if (px_cell[2]) rgb = (round == R_OVER && has_winner && px_cell[1:0] == winner && frame_cnt[3])
                                ? WHITE : pcol(px_cell[1:0]);

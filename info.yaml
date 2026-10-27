@@ -8,7 +8,7 @@ project:
   clock_hz:     40000000 # 800x600@60 pixel clock
 
   # How many tiles your design occupies? A single tile is about 167x108 uM.
-  tiles: "3x2"          # Not hardened yet; the 64x16 trail ring alone is 1024 flops. Valid values: 1x1, 1x2, 2x2, 3x2, 4x2, 6x2 or 8x2
+  tiles: "3x2"          # Valid values: 1x1, 1x2, 2x2, 3x2, 4x2, 6x2 or 8x2
 
   # Your top module name must start with "tt_um_". Make it unique by including your github username:
   top_module:  "tt_um_mattvenn_tron"
@@ -18,23 +18,23 @@ project:
   # Don't forget to also update `PROJECT_SOURCES` in test/Makefile.
   source_files:
     - "tt_um_mattvenn_tron.v"
+    - "input_select.v"
     - "tron.v"
-    - "trail_drum.v"
+    - "rf_top.v"
     - "hvsync_generator.v"
-    - "gamepad_pmod.v"
 
 # The pinout of your project. Leave unused pins blank. DO NOT delete or add any pins.
 # This section is for the datasheet/website. Use descriptive names (e.g., RX, TX, MOSI, SCL, SEG_A, etc.).
 pinout:
   # Inputs
-  ui[0]: "speed[0]"
-  ui[1]: "speed[1]"
-  ui[2]: ""
-  ui[3]: ""
-  ui[4]: "gamepad latch"
-  ui[5]: "gamepad clock"
-  ui[6]: "gamepad data"
-  ui[7]: ""
+  ui[0]: "P0 left key / speed[0] at reset"
+  ui[1]: "P0 right key / speed[1] at reset"
+  ui[2]: "P1 left key"
+  ui[3]: "P1 right key"
+  ui[4]: "gamepad latch / P2 left key"
+  ui[5]: "gamepad clock / P2 right key"
+  ui[6]: "gamepad data / P3 left key"
+  ui[7]: "P3 right key"
 
   # Outputs
   uo[0]: "R1"
