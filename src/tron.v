@@ -255,6 +255,11 @@ module tron (
   always @(posedge clk) begin
     e_done <= 1'b0;
     if (!rst_n) begin
+      // The counters are loaded by e_start, but gate level simulation can't
+      // clear an X with a load that synthesis folds into the increment.
+      e_s     <= 7'd0;
+      e_w     <= 5'd0;
+      e_l     <= 2'd0;
       e_run   <= 1'b0;
       e_pv    <= 1'b0;
       e_rv    <= 1'b0;
@@ -544,6 +549,9 @@ module tron (
       tdiv          <= 3'd0;
       count         <= 7'd0;
       building      <= 1'b0;
+      bcol          <= 6'd0;  // reset for gate level simulation, see e_s
+      bcnt          <= 4'd0;
+      bgroup        <= 3'd0;
       btn_left_d    <= 4'b0;
       btn_right_d   <= 4'b0;
       human         <= 4'b0;
@@ -886,7 +894,10 @@ module tron (
   always @(posedge clk) begin
     lb_rot  <= (hpos[3:0] == 4'd14) && (hpos < 11'd800);
     lb_line <= (hpos == 11'd1054);
-    if (lb_line) begin
+    if (!rst_n) begin
+      dgroup <= 3'd0;  // for gate level simulation, see e_s
+      dcell  <= 4'd0;
+    end else if (lb_line) begin
       disp   <= rf_ra[29:0];
       dgroup <= 3'd0;
       dcell  <= 4'd0;
